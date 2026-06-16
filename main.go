@@ -1,9 +1,6 @@
-// Package main is the entry point for GPT-Load Manager.
 package main
 
 import (
-	"embed"
-	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -11,64 +8,71 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/solider245/gpt-load-manager/internal/api"
+	"github.com/solider245/gpt-load-manager/internal/config"
+	"github.com/solider245/gpt-load-manager/internal/db"
+
 	"github.com/gin-gonic/gin"
 )
 
-//go:embed web/dist/*
-var webFS embed.FS
-
 func main() {
-	gin.SetMode(gin.ReleaseMode)
+	cfg := config.Load()
 
+	database, err := db.InitDB(cfg.DBPath)
+	if err != nil {
+		log.Fatalf("Failed to init database: %v", err)
+	}
+	if err := db.AutoMigrate(database); err != nil {
+		log.Fatalf("Failed to migrate database: %v", err)
+	}
+	log.Println("Database initialized:", cfg.DBPath)
+
+	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.Use(gin.Recovery())
 	router.Use(gin.Logger())
 
-	// API routes
-	api := router.Group("/api")
-	{
-		api.GET("/ping", func(c *gin.Context) {
-			c.JSON(http.StatusOK, gin.H{"message": "pong"})
-		})
-	}
+	api.RegisterRoutes(router.Group("/api"), database)
 
-	// Serve frontend
-	staticFS, err := fs.Sub(webFS, "web/dist")
-	if err != nil {
-		log.Printf("No embedded frontend, checking disk: %v", err)
-		webDir := os.Getenv("WEB_DIR")
-		if webDir == "" {
-			webDir = filepath.Join(".", "web", "dist")
-		}
-		if _, err := os.Stat(webDir); err == nil {
-			router.Static("/", webDir)
-			router.NoRoute(func(c *gin.Context) {
-				c.File(filepath.Join(webDir, "index.html"))
-			})
-		}
-	} else {
-		router.StaticFS("/", http.FS(staticFS))
-		router.NoRoute(func(c *gin.Context) {
-			c.FileFromFS("index.html", http.FS(staticFS))
-		})
-	}
-
-	// Start server
-	port := "3002"
-	if p := os.Getenv("PORT"); p != "" {
-		port = p
-	}
+	serveFrontend(router, cfg.WebDir)
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		log.Printf("GPT-Load Manager starting on :%s", port)
-		if err := router.Run(":" + port); err != nil {
+		log.Printf("GPT-Load Manager starting on :%s", cfg.Port)
+		if err := router.Run(":" + cfg.Port); err != nil {
 			log.Fatalf("Server failed: %v", err)
 		}
 	}()
 
 	<-quit
 	log.Println("Shutting down...")
+}
+
+func serveFrontend(router *gin.Engine, webDir string) {
+	if webDir == "" {
+		webDir = filepath.Join(".", "web", "dist")
+	}
+	if _, err := os.Stat(filepath.Join(webDir, "index.html")); err != nil {
+		log.Printf("Frontend not found at %s (API-only mode): %v", webDir, err)
+		return
+	}
+
+	// Serve compiled static assets
+	assetsDir := filepath.Join(webDir, "assets")
+	if fi, err := os.Stat(assetsDir); err == nil && fi.IsDir() {
+		router.Static("/assets", assetsDir)
+	}
+
+	// SPA fallback: serve index.html for all non-API paths
+	router.NoRoute(func(c *gin.Context) {
+		if len(c.Request.URL.Path) >= 4 && c.Request.URL.Path[:4] == "/api" {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Not Found"})
+			return
+		}
+		c.File(filepath.Join(webDir, "index.html"))
+	})
+
+	log.Println("Frontend:", webDir)
 }

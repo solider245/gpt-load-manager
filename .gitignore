@@ -31,4 +31,9 @@ Thumbs.db
 # Data
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 /data/
+
+# Test binary
+gpt-load-manager.exe
